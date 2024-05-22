@@ -23,10 +23,14 @@ impl super::SyncNotificationHandler for DidClose {
         }: types::DidCloseTextDocumentParams,
     ) -> Result<()> {
         // Publish an empty diagnostic report for the document. This will de-register any existing diagnostics.
-        let snapshot = session
-            .take_snapshot(&uri)
-            .ok_or_else(|| anyhow::anyhow!("Unable to take snapshot for document with URL {uri}"))
-            .with_failure_code(lsp_server::ErrorCode::InternalError)?;
+        let Some(snapshot) = session.take_snapshot(&uri) else {
+            // This is a non-fatal error and we don't want to surface this to the user.
+            // If the document snapshot cannot be found, we forgo trying to close the document
+            // and return early, logging the failure instead of propagating it.
+            tracing::error!("Unable to take snapshot for document with URL {uri}");
+            return Ok(());
+        };
+
         clear_diagnostics_for_document(snapshot.query(), &notifier)?;
 
         let key = snapshot.query().make_key();
