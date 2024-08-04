@@ -57,19 +57,20 @@ impl Workspace {
 
     #[wasm_bindgen(js_name = "openFile")]
     pub fn open_file(&mut self, path: &str, contents: &str) -> Result<FileHandle, Error> {
+        let path = SystemPath::new(path);
         self.system
             .fs
             .write_file(path, contents)
             .map_err(into_error)?;
 
+        File::sync_path(&mut self.db, path);
         let file = system_path_to_file(&self.db, path).expect("File to exist");
-        file.sync(&mut self.db);
 
         self.db.workspace().open_file(&mut self.db, file);
 
         Ok(FileHandle {
             file,
-            path: SystemPath::new(path).to_path_buf(),
+            path: path.to_path_buf(),
         })
     }
 
@@ -262,7 +263,7 @@ impl System for WasmSystem {
         &'a self,
         path: &SystemPath,
     ) -> ruff_db::system::Result<
-        Box<dyn Iterator<Item = ruff_db::system::Result<DirectoryEntry>> + 'a>,
+        Box<dyn Iterator<Item=ruff_db::system::Result<DirectoryEntry>> + 'a>,
     > {
         Ok(Box::new(self.fs.read_directory(path)?))
     }
