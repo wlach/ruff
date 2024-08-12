@@ -1,4 +1,10 @@
-import { useCallback, useRef, useState } from "react";
+import {
+  useCallback,
+  useDeferredValue,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import Header from "../shared/Header";
 import { useTheme } from "../shared/theme";
 import { default as Editor } from "./Editor";
@@ -12,10 +18,12 @@ import { loader } from "@monaco-editor/react";
 import { setupMonaco } from "../shared/setupMonaco";
 import { Panel, PanelGroup } from "react-resizable-panels";
 import { Files } from "./Files";
-import { persist, restore } from "./persist";
+import { persist, persistLocal, restore } from "./persist";
+import { ErrorMessage } from "../shared/ErrorMessage";
 
 type CurrentFile = {
   handle: FileHandle;
+  name: string;
   content: string;
 };
 
@@ -23,10 +31,14 @@ export type FileIndex = {
   [name: string]: FileHandle;
 };
 
+interface CheckResult {
+  diagnostics: string[];
+  error: string | null;
+}
+
 export default function Chrome() {
   const initPromise = useRef<null | Promise<void>>(null);
   const [workspace, setWorkspace] = useState<null | Workspace>(null);
-
   const [files, setFiles] = useState<FileIndex>(Object.create(null));
 
   // The revision gets incremented everytime any persisted state changes.
@@ -38,47 +50,74 @@ export default function Chrome() {
   const [theme, setTheme] = useTheme();
 
   const handleShare = useCallback(() => {
-    if (workspace == null || files == null) {
+    if (workspace == null || files == null || currentFile == null) {
       return;
     }
 
-    const filesWithContent = Object.fromEntries(
-      Object.entries(files).map(([name, handle]) => {
-        return [name, workspace.sourceText(handle)];
-      }),
-    );
+    const serialized = toSerializableWorkspace(files, currentFile, workspace);
 
-    persist(filesWithContent).catch((error) => {
+    persist(serialized).catch((error) => {
       console.error("Failed to share playground", error);
     });
-  }, [files, workspace]);
+  }, [files, workspace, currentFile]);
+
+  const deferredCurrentFile = useDeferredValue(currentFile);
+
+  const checkResult: CheckResult = useMemo(() => {
+    if (workspace == null || deferredCurrentFile?.handle == null) {
+      return {
+        diagnostics: [],
+        error: null,
+      };
+    }
+
+    const serialized = toSerializableWorkspace(
+      files,
+      deferredCurrentFile,
+      workspace,
+    );
+
+    persistLocal(serialized);
+
+    try {
+      const diagnostics = workspace.checkFile(deferredCurrentFile.handle);
+      return {
+        diagnostics,
+        error: null,
+      };
+    } catch (e) {
+      console.error(e);
+
+      return {
+        diagnostics: [],
+        error: (e as Error).message,
+      };
+    }
+  }, [deferredCurrentFile, workspace, files]);
 
   if (initPromise.current == null) {
     initPromise.current = startPlayground()
-      .then(({ version, files: workspaceFiles }) => {
+      .then(({ version, workspace: fetchedWorkspace }) => {
         const settings = new Settings(TargetVersion.Py312);
         const workspace = new Workspace("/", settings);
         setVersion(version);
         setWorkspace(workspace);
 
-        console.log(workspaceFiles);
+        let currentFile = null;
         const files: Array<[string, FileHandle]> = Object.entries(
-          workspaceFiles,
+          fetchedWorkspace.files,
         ).map(([name, content]) => {
           const handle = workspace.openFile(name, content);
+
+          if (name === fetchedWorkspace.current) {
+            currentFile = { name, handle, content };
+          }
+
           return [name, handle];
         });
 
         setFiles(Object.fromEntries(files));
-
-        if (files.length > 0) {
-          const [currentName, handle] = files[0];
-          setCurrentFile({
-            handle,
-            content: workspaceFiles[currentName],
-          });
-        }
-
+        setCurrentFile(currentFile);
         setRevision(1);
       })
       .catch((error) => {
@@ -113,12 +152,18 @@ export default function Chrome() {
         return;
       }
 
+      const name = Object.entries(files).find(
+        ([, value]) => value === file,
+      )![0];
+
       setCurrentFile({
         handle: file,
+        name,
         content: workspace.sourceText(file),
       });
+      setRevision((revision) => revision + 1);
     },
-    [workspace],
+    [workspace, files],
   );
 
   const handleFileAdded = useCallback(
@@ -130,6 +175,7 @@ export default function Chrome() {
       const handle = workspace.openFile(name, "");
       setCurrentFile({
         handle,
+        name,
         content: "",
       });
 
@@ -162,9 +208,10 @@ export default function Chrome() {
         if (newCurrentFile == null) {
           setCurrentFile(null);
         } else {
-          const handle = newCurrentFile[1];
+          const [name, handle] = newCurrentFile;
           setCurrentFile({
             handle,
+            name,
             content: workspace.sourceText(handle),
           });
         }
@@ -190,6 +237,7 @@ export default function Chrome() {
       if (currentFile?.handle === file) {
         setCurrentFile({
           content,
+          name: newName,
           handle: newFile,
         });
       }
@@ -203,7 +251,7 @@ export default function Chrome() {
         return Object.fromEntries(entries);
       });
 
-      setRevision((revision) => (revision += 1));
+      setRevision((revision) => revision + 1);
     },
     [workspace, currentFile],
   );
@@ -242,13 +290,26 @@ export default function Chrome() {
                   theme={theme}
                   content={currentFile.content}
                   onSourceChanged={handleSourceChanged}
-                  file={currentFile.handle}
-                  workspace={workspace}
+                  fileDiagnostics={checkResult.diagnostics}
+                  fileName={currentFile.name}
                 />
               </div>
             </Panel>
           ) : null}
         </PanelGroup>
+
+        {checkResult.error ? (
+          <div
+            style={{
+              position: "fixed",
+              left: "10%",
+              right: "10%",
+              bottom: "10%",
+            }}
+          >
+            <ErrorMessage>{checkResult.error}</ErrorMessage>
+          </div>
+        ) : null}
       </div>
     </main>
   );
@@ -257,7 +318,7 @@ export default function Chrome() {
 // Run once during startup. Initializes monaco, loads the wasm file, and restores the previous editor state.
 async function startPlayground(): Promise<{
   version: string;
-  files: { [name: string]: string };
+  workspace: { files: { [name: string]: string }; current: string };
 }> {
   await initRedKnot();
   const monaco = await loader.init();
@@ -266,12 +327,27 @@ async function startPlayground(): Promise<{
 
   const restored = await restore();
 
-  const files = restored ?? {
-    "main.py": "import os",
+  const workspace = restored ?? {
+    files: { "main.py": "import os" },
+    current: "main.py",
   };
 
   return {
     version: "0.0.0",
-    files,
+    workspace,
   };
+}
+
+function toSerializableWorkspace(
+  files: { [name: string]: FileHandle },
+  currentFile: CurrentFile,
+  workspace: Workspace,
+): { files: { [name: string]: string }; current: string } {
+  const filesWithContent = Object.fromEntries(
+    Object.entries(files).map(([name, handle]) => {
+      return [name, workspace.sourceText(handle)];
+    }),
+  );
+
+  return { files: filesWithContent, current: currentFile.name };
 }

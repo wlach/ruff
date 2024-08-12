@@ -4,6 +4,8 @@ const API_URL = import.meta.env.PROD
 
 export type Playground = {
   files: { [name: string]: string };
+  /// the name of the current file
+  current: string;
 };
 
 /**
