@@ -8,7 +8,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: "index.html",
-        red_knot: "red_knot.html",
+        red_knot: "red-knot/index.html",
       },
     },
   },

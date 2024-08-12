@@ -1,5 +1,5 @@
 import lzstring from "lz-string";
-import { fetchPlayground, savePlayground } from "../shared/api";
+import { fetchPlayground, savePlayground } from "./api";
 
 export type Settings = { [K: string]: any };
 
@@ -51,15 +51,11 @@ export async function restore(): Promise<[string, string] | null> {
   //     https://play.ruff.rs/1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed
   let id = window.location.pathname.slice(1);
 
-  if (id.startsWith("red_knot")) {
-    id = id.substring("red_knot".length);
-  }
-
   if (id.startsWith("/")) {
     id = id.substring(1);
   }
 
-  if (id && id !== "red_knot") {
+  if (id) {
     const playground = await fetchPlayground(id);
     if (playground == null) {
       return null;

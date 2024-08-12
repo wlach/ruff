@@ -12,6 +12,7 @@ import { loader } from "@monaco-editor/react";
 import { setupMonaco } from "../shared/setupMonaco";
 import { Panel, PanelGroup } from "react-resizable-panels";
 import { Files } from "./Files";
+import { persist, restore } from "./persist";
 
 type CurrentFile = {
   handle: FileHandle;
@@ -26,7 +27,7 @@ export default function Chrome() {
   const initPromise = useRef<null | Promise<void>>(null);
   const [workspace, setWorkspace] = useState<null | Workspace>(null);
 
-  const [files, setFiles] = useState<FileIndex>({});
+  const [files, setFiles] = useState<FileIndex>(Object.create(null));
 
   // The revision gets incremented everytime any persisted state changes.
   const [revision, setRevision] = useState(0);
@@ -37,28 +38,46 @@ export default function Chrome() {
   const [theme, setTheme] = useTheme();
 
   const handleShare = useCallback(() => {
-    alert("TODO");
-  }, []);
+    if (workspace == null || files == null) {
+      return;
+    }
+
+    const filesWithContent = Object.fromEntries(
+      Object.entries(files).map(([name, handle]) => {
+        return [name, workspace.sourceText(handle)];
+      }),
+    );
+
+    persist(filesWithContent).catch((error) => {
+      console.error("Failed to share playground", error);
+    });
+  }, [files, workspace]);
 
   if (initPromise.current == null) {
     initPromise.current = startPlayground()
-      .then(({ version }) => {
+      .then(({ version, files: workspaceFiles }) => {
         const settings = new Settings(TargetVersion.Py312);
         const workspace = new Workspace("/", settings);
         setVersion(version);
         setWorkspace(workspace);
 
-        const content = "import os";
-        const main = workspace.openFile("main.py", content);
-
-        setFiles({
-          "main.py": main,
+        console.log(workspaceFiles);
+        const files: Array<[string, FileHandle]> = Object.entries(
+          workspaceFiles,
+        ).map(([name, content]) => {
+          const handle = workspace.openFile(name, content);
+          return [name, handle];
         });
 
-        setCurrentFile({
-          handle: main,
-          content,
-        });
+        setFiles(Object.fromEntries(files));
+
+        if (files.length > 0) {
+          const [currentName, handle] = files[0];
+          setCurrentFile({
+            handle,
+            content: workspaceFiles[currentName],
+          });
+        }
 
         setRevision(1);
       })
@@ -238,13 +257,21 @@ export default function Chrome() {
 // Run once during startup. Initializes monaco, loads the wasm file, and restores the previous editor state.
 async function startPlayground(): Promise<{
   version: string;
+  files: { [name: string]: string };
 }> {
   await initRedKnot();
   const monaco = await loader.init();
 
   setupMonaco(monaco);
 
+  const restored = await restore();
+
+  const files = restored ?? {
+    "main.py": "import os",
+  };
+
   return {
     version: "0.0.0",
+    files,
   };
 }
