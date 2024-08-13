@@ -5,6 +5,7 @@ use wasm_bindgen::prelude::*;
 
 use red_knot_python_semantic::{ProgramSettings, SearchPathSettings};
 use red_knot_workspace::db::RootDatabase;
+use red_knot_workspace::watch::{ChangeEvent, ChangedKind, CreatedKind, DeletedKind};
 use red_knot_workspace::workspace::WorkspaceMetadata;
 use ruff_db::files::{system_path_to_file, File};
 use ruff_db::system::walk_directory::WalkDirectoryBuilder;
@@ -63,7 +64,11 @@ impl Workspace {
             .write_file(path, contents)
             .map_err(into_error)?;
 
-        File::sync_path(&mut self.db, path);
+        self.db.apply_changes(vec![ChangeEvent::Created {
+            path: path.to_path_buf(),
+            kind: CreatedKind::File,
+        }]);
+
         let file = system_path_to_file(&self.db, path).expect("File to exist");
 
         self.db.workspace().open_file(&mut self.db, file);
@@ -85,7 +90,16 @@ impl Workspace {
             .write_file(&file_id.path, contents)
             .map_err(into_error)?;
 
-        file_id.file.sync(&mut self.db);
+        self.db.apply_changes(vec![
+            ChangeEvent::Changed {
+                path: file_id.path.to_path_buf(),
+                kind: ChangedKind::FileContent,
+            },
+            ChangeEvent::Changed {
+                path: file_id.path.to_path_buf(),
+                kind: ChangedKind::FileMetadata,
+            },
+        ]);
 
         Ok(())
     }
@@ -100,7 +114,10 @@ impl Workspace {
             .remove_file(&file_id.path)
             .map_err(into_error)?;
 
-        file.sync(&mut self.db);
+        self.db.apply_changes(vec![ChangeEvent::Deleted {
+            path: file_id.path.to_path_buf(),
+            kind: DeletedKind::File,
+        }]);
 
         Ok(())
     }
@@ -263,7 +280,7 @@ impl System for WasmSystem {
         &'a self,
         path: &SystemPath,
     ) -> ruff_db::system::Result<
-        Box<dyn Iterator<Item=ruff_db::system::Result<DirectoryEntry>> + 'a>,
+        Box<dyn Iterator<Item = ruff_db::system::Result<DirectoryEntry>> + 'a>,
     > {
         Ok(Box::new(self.fs.read_directory(path)?))
     }

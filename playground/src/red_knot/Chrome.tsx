@@ -1,7 +1,9 @@
 import {
   useCallback,
   useDeferredValue,
+  useEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
 } from "react";
@@ -21,16 +23,6 @@ import { Files } from "./Files";
 import { persist, persistLocal, restore } from "./persist";
 import { ErrorMessage } from "../shared/ErrorMessage";
 
-type CurrentFile = {
-  handle: FileHandle;
-  name: string;
-  content: string;
-};
-
-export type FileIndex = {
-  [name: string]: FileHandle;
-};
-
 interface CheckResult {
   diagnostics: string[];
   error: string | null;
@@ -39,61 +31,29 @@ interface CheckResult {
 export default function Chrome() {
   const initPromise = useRef<null | Promise<void>>(null);
   const [workspace, setWorkspace] = useState<null | Workspace>(null);
-  const [files, setFiles] = useState<FileIndex>(Object.create(null));
+  const [files, dispatchFiles] = useReducer(filesReducer, {
+    index: [],
+    contents: Object.create(null),
+    handles: Object.create(null),
+    nextId: 0,
+    revision: 0,
+    selected: null,
+  });
 
-  // The revision gets incremented everytime any persisted state changes.
-  const [revision, setRevision] = useState(0);
   const [version, setVersion] = useState("");
-
-  const [currentFile, setCurrentFile] = useState<CurrentFile | null>(null);
-
   const [theme, setTheme] = useTheme();
 
+  usePersistLocally(files);
+
   const handleShare = useCallback(() => {
-    if (workspace == null || files == null || currentFile == null) {
-      return;
+    const serialized = serializeFiles(files);
+
+    if (serialized != null) {
+      persist(serialized).catch((error) => {
+        console.error("Failed to share playground", error);
+      });
     }
-
-    const serialized = toSerializableWorkspace(files, currentFile, workspace);
-
-    persist(serialized).catch((error) => {
-      console.error("Failed to share playground", error);
-    });
-  }, [files, workspace, currentFile]);
-
-  const deferredCurrentFile = useDeferredValue(currentFile);
-
-  const checkResult: CheckResult = useMemo(() => {
-    if (workspace == null || deferredCurrentFile?.handle == null) {
-      return {
-        diagnostics: [],
-        error: null,
-      };
-    }
-
-    const serialized = toSerializableWorkspace(
-      files,
-      deferredCurrentFile,
-      workspace,
-    );
-
-    persistLocal(serialized);
-
-    try {
-      const diagnostics = workspace.checkFile(deferredCurrentFile.handle);
-      return {
-        diagnostics,
-        error: null,
-      };
-    } catch (e) {
-      console.error(e);
-
-      return {
-        diagnostics: [],
-        error: (e as Error).message,
-      };
-    }
-  }, [deferredCurrentFile, workspace, files]);
+  }, [files]);
 
   if (initPromise.current == null) {
     initPromise.current = startPlayground()
@@ -103,22 +63,15 @@ export default function Chrome() {
         setVersion(version);
         setWorkspace(workspace);
 
-        let currentFile = null;
-        const files: Array<[string, FileHandle]> = Object.entries(
-          fetchedWorkspace.files,
-        ).map(([name, content]) => {
+        for (const [name, content] of Object.entries(fetchedWorkspace.files)) {
           const handle = workspace.openFile(name, content);
+          dispatchFiles({ type: "add", handle, name, content });
+        }
 
-          if (name === fetchedWorkspace.current) {
-            currentFile = { name, handle, content };
-          }
-
-          return [name, handle];
+        dispatchFiles({
+          type: "selectFileByName",
+          name: fetchedWorkspace.current,
         });
-
-        setFiles(Object.fromEntries(files));
-        setCurrentFile(currentFile);
-        setRevision(1);
       })
       .catch((error) => {
         console.error("Failed to initialize playground.", error);
@@ -127,43 +80,31 @@ export default function Chrome() {
 
   const handleSourceChanged = useCallback(
     (source: string) => {
-      if (
-        workspace == null ||
-        currentFile == null ||
-        source == currentFile.content
-      ) {
+      if (files.selected == null) {
         return;
       }
 
-      workspace.updateFile(currentFile.handle, source);
-
-      setCurrentFile({
-        ...currentFile,
+      dispatchFiles({
+        type: "change",
+        id: files.selected,
         content: source,
       });
-      setRevision((revision) => revision + 1);
     },
-    [workspace, currentFile],
+    [files.selected],
   );
 
   const handleFileClicked = useCallback(
-    (file: FileHandle) => {
-      if (workspace == null) {
-        return;
+    (file: FileId) => {
+      if (workspace != null && files.selected != null) {
+        workspace.updateFile(
+          files.handles[files.selected],
+          files.contents[files.selected],
+        );
       }
 
-      const name = Object.entries(files).find(
-        ([, value]) => value === file,
-      )![0];
-
-      setCurrentFile({
-        handle: file,
-        name,
-        content: workspace.sourceText(file),
-      });
-      setRevision((revision) => revision + 1);
+      dispatchFiles({ type: "selectFile", id: file });
     },
-    [workspace, files],
+    [workspace, files.contents, files.handles, files.selected],
   );
 
   const handleFileAdded = useCallback(
@@ -172,94 +113,58 @@ export default function Chrome() {
         return;
       }
 
-      const handle = workspace.openFile(name, "");
-      setCurrentFile({
-        handle,
-        name,
-        content: "",
-      });
+      if (files.selected != null) {
+        workspace.updateFile(
+          files.handles[files.selected],
+          files.contents[files.selected],
+        );
+      }
 
-      setFiles((files) => ({ ...files, [name]: handle }));
-      setRevision((revision) => revision + 1);
+      const handle = workspace.openFile(name, "");
+      dispatchFiles({ type: "add", name, handle, content: "" });
     },
-    [workspace],
+    [workspace, files.handles, files.contents, files.selected],
   );
 
   const handleFileRemoved = useCallback(
-    (file: FileHandle) => {
-      if (workspace == null) {
-        return;
+    (file: FileId) => {
+      if (workspace != null) {
+        workspace.closeFile(files.handles[file]);
       }
 
-      const fileEntries = Object.entries(files);
-      const index = fileEntries.findIndex(([, value]) => value === file);
-
-      if (index === -1) {
-        return;
-      }
-
-      // Remove the file
-      fileEntries.splice(index, 1);
-
-      if (currentFile?.handle === file) {
-        const newCurrentFile =
-          index > 0 ? fileEntries[index - 1] : fileEntries[index];
-
-        if (newCurrentFile == null) {
-          setCurrentFile(null);
-        } else {
-          const [name, handle] = newCurrentFile;
-          setCurrentFile({
-            handle,
-            name,
-            content: workspace.sourceText(handle),
-          });
-        }
-      }
-
-      workspace.closeFile(file);
-      setFiles(Object.fromEntries(fileEntries));
-      setRevision((revision) => revision + 1);
+      dispatchFiles({ type: "remove", id: file });
     },
-    [currentFile, workspace, files],
+    [workspace, files.handles],
   );
 
   const handleFileRenamed = useCallback(
-    (file: FileHandle, newName: string) => {
+    (file: FileId, newName: string) => {
       if (workspace == null) {
         return;
       }
 
-      const content = workspace.sourceText(file);
-      workspace.closeFile(file);
-      const newFile = workspace.openFile(newName, content);
+      workspace.closeFile(files.handles[file]);
+      const newHandle = workspace.openFile(newName, files.contents[file]);
 
-      if (currentFile?.handle === file) {
-        setCurrentFile({
-          content,
-          name: newName,
-          handle: newFile,
-        });
-      }
-
-      setFiles((files) => {
-        const entries = Object.entries(files);
-        const index = entries.findIndex(([, value]) => value === file);
-
-        entries.splice(index, 1, [newName, newFile]);
-
-        return Object.fromEntries(entries);
-      });
-
-      setRevision((revision) => revision + 1);
+      dispatchFiles({ type: "rename", id: file, to: newName, newHandle });
     },
-    [workspace, currentFile],
+    [workspace, files.handles, files.contents],
   );
+
+  const fileName = useMemo(() => {
+    if (files.selected == null) {
+      return "";
+    }
+
+    return files.index.find(({ id }) => id === files.selected)?.name ?? "";
+  }, [files.selected, files.index]);
+
+  const checkResult = useCheckResult(files, workspace);
 
   return (
     <main className="flex flex-col h-full bg-ayu-background dark:bg-ayu-background-dark">
       <Header
-        edit={revision}
+        edit={files.revision}
         theme={theme}
         version={version}
         onChangeTheme={setTheme}
@@ -268,7 +173,7 @@ export default function Chrome() {
 
       <div className="flex grow">
         <PanelGroup direction="horizontal" autoSaveId="main">
-          {workspace != null && currentFile != null ? (
+          {workspace != null && files.selected != null ? (
             <Panel
               id="main"
               order={0}
@@ -276,9 +181,9 @@ export default function Chrome() {
               minSize={10}
             >
               <Files
-                files={files}
+                files={files.index}
                 theme={theme}
-                selected={currentFile?.handle ?? null}
+                selected={files.selected}
                 onAdd={handleFileAdded}
                 onRename={handleFileRenamed}
                 onSelected={handleFileClicked}
@@ -288,10 +193,10 @@ export default function Chrome() {
               <div className="flex-grow">
                 <Editor
                   theme={theme}
-                  content={currentFile.content}
+                  content={files.contents[files.selected]}
                   onSourceChanged={handleSourceChanged}
                   fileDiagnostics={checkResult.diagnostics}
-                  fileName={currentFile.name}
+                  fileName={fileName}
                 />
               </div>
             </Panel>
@@ -338,16 +243,216 @@ async function startPlayground(): Promise<{
   };
 }
 
-function toSerializableWorkspace(
-  files: { [name: string]: FileHandle },
-  currentFile: CurrentFile,
-  workspace: Workspace,
-): { files: { [name: string]: string }; current: string } {
-  const filesWithContent = Object.fromEntries(
-    Object.entries(files).map(([name, handle]) => {
-      return [name, workspace.sourceText(handle)];
-    }),
+/**
+ * Persists the files to local storage. This is done deferred to avoid too frequent writes.
+ */
+function usePersistLocally(files: FilesState): void {
+  const deferredFiles = useDeferredValue(files);
+
+  useEffect(() => {
+    const serialized = serializeFiles(deferredFiles);
+    if (serialized != null) {
+      persistLocal(serialized);
+    }
+  }, [deferredFiles]);
+}
+
+function useCheckResult(
+  files: FilesState,
+  workspace: Workspace | null,
+): CheckResult {
+  const deferredContent = useDeferredValue(
+    files.selected == null ? null : files.contents[files.selected],
   );
 
-  return { files: filesWithContent, current: currentFile.name };
+  return useMemo(() => {
+    if (
+      workspace == null ||
+      files.selected == null ||
+      deferredContent == null
+    ) {
+      return {
+        diagnostics: [],
+        error: null,
+      };
+    }
+
+    const currentHandle = files.handles[files.selected];
+    // Update the workspace content but use the deferred value to avoid too frequent updates.
+    workspace.updateFile(currentHandle, deferredContent);
+
+    try {
+      const diagnostics = workspace.checkFile(currentHandle);
+      return {
+        diagnostics,
+        error: null,
+      };
+    } catch (e) {
+      console.error(e);
+
+      return {
+        diagnostics: [],
+        error: (e as Error).message,
+      };
+    }
+  }, [deferredContent, workspace, files.selected, files.handles]);
+}
+
+export type FileId = number;
+
+interface FilesState {
+  /**
+   * The currently selected file that is shown in the editor.
+   */
+  selected: FileId | null;
+
+  /**
+   * The files in display order (ordering is sensitive)
+   */
+  index: ReadonlyArray<{ id: FileId; name: string }>;
+
+  /**
+   * The database file handles by file id.
+   */
+  handles: Readonly<{ [id: FileId]: FileHandle }>;
+
+  /**
+   * The content per file indexed by file id.
+   */
+  contents: Readonly<{ [id: FileId]: string }>;
+
+  /**
+   * The revision. Gets incremented everytime files changes.
+   */
+  revision: number;
+  nextId: FileId;
+}
+
+type FileAction =
+  | {
+      type: "add";
+      handle: FileHandle;
+      /// The file name
+      name: string;
+      content: string;
+    }
+  | {
+      type: "change";
+      id: FileId;
+      content: string;
+    }
+  | { type: "rename"; id: FileId; to: string; newHandle: FileHandle }
+  | {
+      type: "remove";
+      id: FileId;
+    }
+  | { type: "selectFile"; id: FileId }
+  | { type: "selectFileByName"; name: string };
+
+function filesReducer(
+  state: Readonly<FilesState>,
+  action: FileAction,
+): FilesState {
+  switch (action.type) {
+    case "add": {
+      const { handle, name, content } = action;
+      const id = state.nextId;
+      return {
+        ...state,
+        selected: id,
+        index: [...state.index, { id, name }],
+        handles: { ...state.handles, [id]: handle },
+        contents: { ...state.contents, [id]: content },
+        nextId: state.nextId + 1,
+        revision: state.revision + 1,
+      };
+    }
+
+    case "change": {
+      const { id, content } = action;
+      return {
+        ...state,
+        contents: { ...state.contents, [id]: content },
+        revision: state.revision + 1,
+      };
+    }
+
+    case "remove": {
+      const { id } = action;
+
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { [id]: _content, ...contents } = state.contents;
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { [id]: _handle, ...handles } = state.handles;
+
+      let selected = state.selected;
+
+      if (state.selected === id) {
+        const index = state.index.findIndex((file) => file.id === id);
+
+        selected =
+          index > 0 ? state.index[index - 1].id : state.index[index + 1].id;
+      }
+
+      return {
+        ...state,
+        selected,
+        index: state.index.filter((file) => file.id !== id),
+        contents,
+        handles,
+        revision: state.revision + 1,
+      };
+    }
+    case "rename": {
+      const { id, to, newHandle } = action;
+
+      const index = state.index.findIndex((file) => file.id === id);
+      const newIndex = [...state.index];
+      newIndex.splice(index, 1, { id, name: to });
+
+      return {
+        ...state,
+        index: newIndex,
+        handles: { ...state.handles, [id]: newHandle },
+      };
+    }
+
+    case "selectFile": {
+      const { id } = action;
+
+      return {
+        ...state,
+        selected: id,
+      };
+    }
+
+    case "selectFileByName": {
+      const { name } = action;
+
+      const selected =
+        state.index.find((file) => file.name === name)?.id ?? null;
+
+      return {
+        ...state,
+        selected,
+      };
+    }
+  }
+}
+
+function serializeFiles(files: FilesState): {
+  files: { [name: string]: string };
+  current: string;
+} | null {
+  if (files.selected == null) {
+    return null;
+  }
+
+  const serializedFiles = Object.create(null);
+
+  for (const { id, name } of files.index) {
+    serializedFiles[name] = files.contents[id];
+  }
+
+  return { files: serializedFiles, current: files.index[files.selected].name };
 }

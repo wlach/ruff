@@ -1,20 +1,19 @@
-import { FileHandle } from "./red_knot_wasm";
-import { FileIndex } from "./Chrome";
+import { FileId } from "./Chrome";
 import { AddIcon, CloseIcon, PythonIcon } from "../shared/Icons";
 import classNames from "classnames";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { Theme } from "../shared/theme";
 
 export interface Props {
   // The file names
-  files: FileIndex;
+  files: ReadonlyArray<{ id: FileId; name: string }>;
   theme: Theme;
-  selected: FileHandle | null;
+  selected: FileId | null;
 
   onAdd(name: string): void;
-  onRemove(id: FileHandle): void;
-  onSelected(id: FileHandle): void;
-  onRename(id: FileHandle, newName: string): void;
+  onRemove(id: FileId): void;
+  onSelected(id: FileId): void;
+  onRename(id: FileId, newName: string): void;
 }
 
 export function Files({
@@ -30,7 +29,7 @@ export function Files({
     let index: number | null = null;
     let fileName = "file.py";
 
-    while (files[fileName] != null) {
+    while (files.some(({ name }) => name === fileName)) {
       index = (index ?? 0) + 1;
       fileName = `file${index}.py`;
     }
@@ -38,9 +37,7 @@ export function Files({
     onAdd(fileName);
   };
 
-  const lastFile = useMemo(() => {
-    return Object.keys(files).length === 1;
-  }, [files]);
+  const lastFile = files.length === 1;
 
   return (
     <ul
@@ -49,22 +46,22 @@ export function Files({
         theme === "dark" ? "text-white border-rock" : null,
       )}
     >
-      {Object.entries(files).map(([name, file]) => (
-        <ListItem key={name} selected={selected === file} theme={theme}>
+      {files.map(({ id, name }) => (
+        <ListItem key={id} selected={selected === id} theme={theme}>
           <FileEntry
-            selected={selected === file}
+            selected={selected === id}
             name={name}
-            onClicked={() => onSelected(file)}
+            onClicked={() => onSelected(id)}
             onRenamed={(newName) => {
-              if (files[newName] == null) {
-                onRename(file, newName);
+              if (!files.some(({ name }) => name === newName)) {
+                onRename(id, newName);
               }
             }}
           />
 
           <button
             disabled={lastFile}
-            onClick={lastFile ? undefined : () => onRemove(file)}
+            onClick={lastFile ? undefined : () => onRemove(id)}
             className={"inline-block disabled:opacity-50"}
             title="Close file"
           >
@@ -100,10 +97,11 @@ function ListItem({ children, selected, theme }: ListItemProps) {
         "flex",
         "px-4",
         "gap-2",
-        "border-b-1",
         "text-sm",
         "items-center",
-        selected ? ["active", "border-b-2", activeBorderColor] : null,
+        selected
+          ? ["active", "border-b-2", "pb-0", activeBorderColor]
+          : ["pb-0.5"],
       )}
     >
       {children}
