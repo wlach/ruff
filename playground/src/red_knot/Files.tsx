@@ -8,7 +8,7 @@ export interface Props {
   // The file names
   files: ReadonlyArray<{ id: FileId; name: string }>;
   theme: Theme;
-  selected: FileId | null;
+  selected: FileId;
 
   onAdd(name: string): void;
   onRemove(id: FileId): void;

@@ -9,12 +9,11 @@ import {
 } from "react";
 import Header from "../shared/Header";
 import { useTheme } from "../shared/theme";
-import { default as Editor } from "./Editor";
 import initRedKnot, {
-  Workspace,
+  FileHandle,
   Settings,
   TargetVersion,
-  FileHandle,
+  Workspace,
 } from "./red_knot_wasm";
 import { loader } from "@monaco-editor/react";
 import { setupMonaco } from "../shared/setupMonaco";
@@ -22,10 +21,16 @@ import { Panel, PanelGroup } from "react-resizable-panels";
 import { Files } from "./Files";
 import { persist, persistLocal, restore } from "./persist";
 import { ErrorMessage } from "../shared/ErrorMessage";
+import SecondarySideBar from "./SecondarySideBar";
+import { SecondaryTool } from "./SecondaryPanel";
+import Editor from "./Editor";
+import { HorizontalResizeHandle } from "../shared/ResizeHandle";
+import SecondaryPanel, { SecondaryPanelResult } from "../ruff/SecondaryPanel";
 
 interface CheckResult {
   diagnostics: string[];
   error: string | null;
+  secondary: SecondaryPanelResult;
 }
 
 export default function Chrome() {
@@ -39,6 +44,9 @@ export default function Chrome() {
     revision: 0,
     selected: null,
   });
+  const [secondaryTool, setSecondaryTool] = useState<SecondaryTool | null>(
+    null,
+  );
 
   const [version, setVersion] = useState("");
   const [theme, setTheme] = useTheme();
@@ -151,15 +159,20 @@ export default function Chrome() {
     [workspace, files.handles, files.contents],
   );
 
-  const fileName = useMemo(() => {
-    if (files.selected == null) {
-      return "";
-    }
+  const handleSecondaryToolSelected = useCallback(
+    (tool: SecondaryTool | null) => {
+      setSecondaryTool((secondaryTool) => {
+        if (tool === secondaryTool) {
+          return null;
+        }
 
-    return files.index.find(({ id }) => id === files.selected)?.name ?? "";
-  }, [files.selected, files.index]);
+        return tool;
+      });
+    },
+    [],
+  );
 
-  const checkResult = useCheckResult(files, workspace);
+  const checkResult = useCheckResult(files, workspace, secondaryTool);
 
   return (
     <main className="flex flex-col h-full bg-ayu-background dark:bg-ayu-background-dark">
@@ -171,51 +184,69 @@ export default function Chrome() {
         onShare={handleShare}
       />
 
-      <div className="flex grow">
-        <PanelGroup direction="horizontal" autoSaveId="main">
-          {workspace != null && files.selected != null ? (
+      {workspace != null && files.selected != null ? (
+        <>
+          <Files
+            files={files.index}
+            theme={theme}
+            selected={files.selected}
+            onAdd={handleFileAdded}
+            onRename={handleFileRenamed}
+            onSelected={handleFileClicked}
+            onRemove={handleFileRemoved}
+          />
+          <PanelGroup direction="horizontal" autoSaveId="main">
             <Panel
               id="main"
               order={0}
               className="flex flex-col gap-2"
               minSize={10}
             >
-              <Files
-                files={files.index}
+              <Editor
                 theme={theme}
-                selected={files.selected}
-                onAdd={handleFileAdded}
-                onRename={handleFileRenamed}
-                onSelected={handleFileClicked}
-                onRemove={handleFileRemoved}
+                visible={true}
+                source={files.contents[files.selected]}
+                onChange={handleSourceChanged}
+                diagnostics={checkResult.diagnostics}
               />
-
-              <div className="flex-grow">
-                <Editor
-                  theme={theme}
-                  content={files.contents[files.selected]}
-                  onSourceChanged={handleSourceChanged}
-                  fileDiagnostics={checkResult.diagnostics}
-                  fileName={fileName}
-                />
-              </div>
             </Panel>
-          ) : null}
-        </PanelGroup>
+            {secondaryTool != null && (
+              <>
+                <HorizontalResizeHandle />
+                <Panel
+                  id="secondary-panel"
+                  order={1}
+                  className={"my-2"}
+                  minSize={10}
+                >
+                  <SecondaryPanel
+                    theme={theme}
+                    tool={secondaryTool}
+                    result={checkResult.secondary}
+                  />
+                </Panel>
+              </>
+            )}
+            <SecondarySideBar
+              selected={secondaryTool}
+              onSelected={handleSecondaryToolSelected}
+            />
+          </PanelGroup>
+        </>
+      ) : null}
 
-        {checkResult.error ? (
-          <div
-            style={{
-              position: "fixed",
-              left: "10%",
-              right: "10%",
-              bottom: "10%",
-            }}
-          >
-            <ErrorMessage>{checkResult.error}</ErrorMessage>
-          </div>
-        ) : null}
-      </div>
+      {checkResult.error ? (
+        <div
+          style={{
+            position: "fixed",
+            left: "10%",
+            right: "10%",
+            bottom: "10%",
+          }}
+        >
+          <ErrorMessage>{checkResult.error}</ErrorMessage>
+        </div>
+      ) : null}
     </main>
   );
 }
@@ -260,6 +291,7 @@ function usePersistLocally(files: FilesState): void {
 function useCheckResult(
   files: FilesState,
   workspace: Workspace | null,
+  secondaryTool: SecondaryTool | null,
 ): CheckResult {
   const deferredContent = useDeferredValue(
     files.selected == null ? null : files.contents[files.selected],
@@ -274,6 +306,7 @@ function useCheckResult(
       return {
         diagnostics: [],
         error: null,
+        secondary: null,
       };
     }
 
@@ -283,9 +316,36 @@ function useCheckResult(
 
     try {
       const diagnostics = workspace.checkFile(currentHandle);
+
+      let secondary: SecondaryPanelResult = null;
+
+      try {
+        switch (secondaryTool) {
+          case "AST":
+            secondary = {
+              status: "ok",
+              content: workspace.parsed(currentHandle),
+            };
+            break;
+
+          case "Tokens":
+            secondary = {
+              status: "ok",
+              content: workspace.tokens(currentHandle),
+            };
+            break;
+        }
+      } catch (error: unknown) {
+        secondary = {
+          status: "error",
+          error: error instanceof Error ? error.message : error + "",
+        };
+      }
+
       return {
         diagnostics,
         error: null,
+        secondary,
       };
     } catch (e) {
       console.error(e);
@@ -293,9 +353,16 @@ function useCheckResult(
       return {
         diagnostics: [],
         error: (e as Error).message,
+        secondary: null,
       };
     }
-  }, [deferredContent, workspace, files.selected, files.handles]);
+  }, [
+    deferredContent,
+    workspace,
+    files.selected,
+    files.handles,
+    secondaryTool,
+  ]);
 }
 
 export type FileId = number;
@@ -444,15 +511,20 @@ function serializeFiles(files: FilesState): {
   files: { [name: string]: string };
   current: string;
 } | null {
-  if (files.selected == null) {
-    return null;
-  }
-
   const serializedFiles = Object.create(null);
+  let selected = null;
 
   for (const { id, name } of files.index) {
     serializedFiles[name] = files.contents[id];
+
+    if (files.selected === id) {
+      selected = name;
+    }
   }
 
-  return { files: serializedFiles, current: files.index[files.selected].name };
+  if (selected == null) {
+    return null;
+  }
+
+  return { files: serializedFiles, current: selected };
 }
