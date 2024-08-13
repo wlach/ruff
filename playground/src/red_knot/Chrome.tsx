@@ -199,7 +199,7 @@ export default function Chrome() {
             <Panel
               id="main"
               order={0}
-              className="flex flex-col gap-2"
+              className="flex flex-col gap-2 my-4"
               minSize={10}
             >
               <Editor

@@ -1,6 +1,8 @@
 use std::any::Any;
 
 use js_sys::Error;
+
+use tracing_subscriber_wasm::MakeConsoleWriter;
 use wasm_bindgen::prelude::*;
 
 use red_knot_python_semantic::{ProgramSettings, SearchPathSettings};
@@ -17,8 +19,6 @@ use ruff_notebook::Notebook;
 
 #[wasm_bindgen(start)]
 pub fn run() {
-    use log::Level;
-
     // When the `console_error_panic_hook` feature is enabled, we can call the
     // `set_panic_hook` function at least once during initialization, and then
     // we will get better error messages if our code ever panics.
@@ -28,7 +28,17 @@ pub fn run() {
     #[cfg(feature = "console_error_panic_hook")]
     console_error_panic_hook::set_once();
 
-    console_log::init_with_level(Level::Debug).expect("Initializing logger went wrong.");
+    tracing_subscriber::fmt()
+        .with_writer(
+            // To avoide trace events in the browser from showing their
+            // JS backtrace, which is very annoying, in my opinion
+            MakeConsoleWriter::default().map_trace_level_to(tracing::Level::TRACE),
+        )
+        // For some reason, if we don't do this in the browser, we get
+        // a runtime error.
+        .with_ansi(false)
+        .without_time()
+        .init();
 }
 
 #[wasm_bindgen]
