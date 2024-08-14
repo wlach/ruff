@@ -10,7 +10,7 @@ export default function SideBar({ children, position }: SideBarProps) {
   return (
     <ul
       className={classNames(
-        "w-12 flex-initial flex flex-col items-stretch bg-galaxy",
+        "w-12 flex-initial  flex flex-col items-stretch bg-galaxy",
         position === "left" ? "border-r" : "border-l",
       )}
     >
