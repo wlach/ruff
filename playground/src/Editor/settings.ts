@@ -38,7 +38,6 @@ export async function restore(): Promise<[string, string] | null> {
   // Legacy URLs, stored as encoded strings in the hash, like:
   //     https://play.ruff.rs/#eyJzZXR0aW5nc1NvdXJjZ...
   const hash = window.location.hash.slice(1);
-
   if (hash) {
     const value = lzstring.decompressFromEncodedURIComponent(
       window.location.hash.slice(1),
@@ -49,12 +48,7 @@ export async function restore(): Promise<[string, string] | null> {
 
   // URLs stored in the database, like:
   //     https://play.ruff.rs/1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed
-  let id = window.location.pathname.slice(1);
-
-  if (id.startsWith("/")) {
-    id = id.substring(1);
-  }
-
+  const id = window.location.pathname.slice(1);
   if (id) {
     const playground = await fetchPlayground(id);
     if (playground == null) {
